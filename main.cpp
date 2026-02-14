@@ -25,13 +25,17 @@ HWND g_hStatusLabel = NULL;
 HWND g_hBtnLang = NULL;      // Language toggle button
 HWND g_hGroupHotkey = NULL;  // Hotkey group box
 HWND g_hDescLabel = NULL;    // Description label
+HWND g_hCheckMouseMap = NULL;// New Checkbox for Mouse Mapping
 
 // State
 bool g_enabled = true;
 bool g_swapMapping = false;
+bool g_mouseMap = false;     // False: Side->Key, True: Mouse->Key
 bool g_isEnglish = false; // False = Chinese, True = English
 bool g_btn1Pressed = false;
 bool g_btn2Pressed = false;
+bool g_lBtnPressed = false;
+bool g_rBtnPressed = false;
 
 // Hotkey
 int g_hotkeyMod = MOD_CONTROL | MOD_ALT;
@@ -46,6 +50,7 @@ void ToggleEnable();
 void RegisterGlobalHotkey();
 void ToggleLanguage();
 void UpdateUIText();
+void UpdateUIInteraction();
 
 // Entry point
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
@@ -96,8 +101,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     }
 
     RegisterGlobalHotkey();
-    UpdateUIText(); // Initialize text AFTER g_hMainWnd is set
+    UpdateUIText(); // Initialize text
     UpdateStatus();
+    UpdateUIInteraction();
 
     ShowWindow(g_hMainWnd, nCmdShow);
 
@@ -135,7 +141,55 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
     MSLLHOOKSTRUCT* pMouse = (MSLLHOOKSTRUCT*)lParam;
 
+    // Handle Left/Right Mouse Button events if g_mouseMap is TRUE
+    if (g_mouseMap && (wParam == WM_LBUTTONDOWN || wParam == WM_LBUTTONUP || wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP)) {
+        // Prevent recursive loop if injected event trigger hook
+        if (pMouse->flags & LLMHF_INJECTED) {
+            return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
+        }
+
+        bool isLeft = (wParam == WM_LBUTTONDOWN || wParam == WM_LBUTTONUP);
+        bool isDown = (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN);
+
+        WORD targetVk = 0;
+
+        if (isLeft) {
+            // Map Left Mouse -> Shift (or Space if swapped)
+            targetVk = g_swapMapping ? VK_SPACE : VK_LSHIFT;
+            
+            if (isDown) {
+                if (g_lBtnPressed) return 1;
+                g_lBtnPressed = true;
+            } else {
+                if (!g_lBtnPressed) return 1;
+                g_lBtnPressed = false;
+            }
+        } else {
+            // Right Mouse
+            targetVk = g_swapMapping ? VK_LSHIFT : VK_SPACE;
+            
+            if (isDown) {
+                if (g_rBtnPressed) return 1;
+                g_rBtnPressed = true;
+            } else {
+                if (!g_rBtnPressed) return 1;
+                g_rBtnPressed = false;
+            }
+        }
+
+        if (targetVk != 0) {
+            SendKey(targetVk, isDown);
+            return 1; // Block original Mouse Click
+        }
+    }
+
     if (wParam == WM_XBUTTONDOWN || wParam == WM_XBUTTONUP) {
+        // If g_mouseMap is TRUE, we must DISABLE normal XButton mapping.
+        // User Requirement: "Must cancel previous mapping"
+        if (g_mouseMap) {
+             return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
+        }
+
         // Determine which X button (1 or 2)
         bool isX1 = (HIWORD(pMouse->mouseData) & XBUTTON1);
         bool isX2 = (HIWORD(pMouse->mouseData) & XBUTTON2);
@@ -210,6 +264,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
             20, y, 300, 30, hwnd, (HMENU)102, g_hInst, NULL);
         SendMessage(g_hCheckSwap, WM_SETFONT, (WPARAM)hFont, TRUE);
+        y += 35;
+
+        // Checkbox: Mouse Map (New)
+        g_hCheckMouseMap = CreateWindow(L"BUTTON", L"",
+            WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+            20, y, 400, 30, hwnd, (HMENU)105, g_hInst, NULL);
+        SendMessage(g_hCheckMouseMap, WM_SETFONT, (WPARAM)hFont, TRUE);
         y += 40;
 
         // Group Box for Hotkey
@@ -247,12 +308,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             20, y, 400, 160, hwnd, NULL, g_hInst, NULL);
         SendMessage(g_hDescLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // UpdateUIText must be called AFTER g_hMainWnd is assigned in wWinMain
-        // But inside WM_CREATE, g_hMainWnd is not yet assigned (it returns the handle later).
-        // So we use 'hwnd' passed to WndProc for the main window handle if we need it immediately,
-        // or just defer the text update.
-        // However, our UpdateUIText uses g_hMainWnd global variable.
-        // We will fix UpdateUIText to use a parameter or handle this in wWinMain.
+        // UpdateUIText will be called in wWinMain after g_hMainWnd is assigned
     }
     return 0;
 
@@ -262,9 +318,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             if (id == 101) {
                 g_enabled = (SendMessage(g_hCheckEnable, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 UpdateStatus();
+                UpdateUIInteraction();
             }
             else if (id == 102) {
                 g_swapMapping = (SendMessage(g_hCheckSwap, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                UpdateStatus();
+            }
+            else if (id == 105) { // Mouse Map Toggle
+                g_mouseMap = (SendMessage(g_hCheckMouseMap, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 UpdateStatus();
             }
             else if (id == 103) {
@@ -297,22 +358,35 @@ void ToggleEnable() {
     g_enabled = !g_enabled;
     SendMessage(g_hCheckEnable, BM_SETCHECK, g_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     UpdateStatus();
+    UpdateUIInteraction();
 }
 
 void UpdateStatus() {
     std::wstring text;
     if (g_isEnglish) {
         text = L"Status: ";
-        text += g_enabled ? L"Enabled" : L"Disabled";
-        text += L" | Mapping: ";
-        text += g_swapMapping ? L"Swapped" : L"Default";
+        text += g_enabled ? L"Active" : L"Disabled";
+        text += L" | Swap: ";
+        text += g_swapMapping ? L"Yes" : L"No";
+        text += L" | Mode: ";
+        text += g_mouseMap ? L"Mouse Button Map" : L"Side Key Map";
     } else {
         text = L"状态: ";
         text += g_enabled ? L"启用" : L"禁用";
-        text += L" | 映射: ";
-        text += g_swapMapping ? L"对调" : L"默认";
+        text += L" | 对调: ";
+        text += g_swapMapping ? L"是" : L"否";
+        text += L" | 模式: ";
+        text += g_mouseMap ? L"鼠标按键映射" : L"侧键映射";
     }
     SetWindowText(g_hStatusLabel, text.c_str());
+}
+
+void UpdateUIInteraction() {
+    BOOL bEnable = !g_enabled;
+    // When mapping is enabled (especially mouse mapping), prevent hotkey changes
+    // because clicking the controls might be difficult or cause issues.
+    EnableWindow(g_hHotkeyInput, bEnable);
+    EnableWindow(g_hBtnSetHotkey, bEnable);
 }
 
 void RegisterGlobalHotkey() {
@@ -344,38 +418,44 @@ void ToggleLanguage() {
 }
 
 void UpdateUIText() {
-    std::wstring title, btnLang, chkEnable, chkSwap, grpHotkey, btnSet, desc;
+    std::wstring title, btnLang, chkEnable, chkSwap, chkMouseMap, grpHotkey, btnSet, desc;
     
     if (g_isEnglish) {
         title = L"in falsus Side-Key Mapping Tool - by BillMa007";
         btnLang = L"中/EN";
         chkEnable = L"Enable Mapping";
         chkSwap = L"Swap Forward/Backward Keys";
+        chkMouseMap = L"Map Left/Right Click to Shift/Space";
         grpHotkey = L"Toggle Hotkey";
         btnSet = L"Apply";
         desc = L"This tool maps mouse side-buttons to Left Shift and Space for the game 'in falsus'.\r\n"
                L"Unlike generic mapping tools, this uses Hardware Scan Codes for real-time mapping,\r\n"
                L"ensuring hold-actions work correctly (e.g. holding a key).\r\n"
+                L"If you want to map the mouse left/right buttons instead of side keys, please check [Map Left/Right Click to Shift/Space].\r\n"
+                L"After enabling mouse button mapping, please remember your toggle hotkey. In emergencies, you can use Alt+Tab to switch windows and then Alt+F4 to close the tool directly.\r\n"
                L"For questions, email: ma237103015@126.com or QQ: 36937975\r\n"
-               L"Project: github.com/billma007/in-falsus-mouse-sidekey-mapping";
+               L"Project: https://github.com/billma007/in-falsus-mouse-sidekey-mapping";
     } else {
         title = L"in falsus 侧键映射工具 - by BillMa007";
         btnLang = L"中/EN";
         chkEnable = L"启用替换效果";
         chkSwap = L"前键/后键效果对调";
+        chkMouseMap = L"将鼠标左右键映射为Shift/空格";
         grpHotkey = L"快速开关快捷键";
         btnSet = L"应用";
         desc = L"本工具是用来在游戏in falsus中将左shift键和空格键映射到鼠标侧键的。\r\n"
                L"和一般的按键映射不同，本工具使用硬件扫描码 (Scan Codes)进行实时映射\r\n"
                L"以保证有长条的时候能够长按侧键保持。\r\n"
+               L"如果不想映射侧键，而是映射鼠标左右键，请勾选[将鼠标左右键映射为Shift/空格]。\r\n"
+               L"开启鼠标左右键映射后，请牢记你的开关快捷键。紧急情况可使用Alt+Tab切换窗口后Alt+F4直接关闭工具\r\n"
                L"如有问题请发邮件到ma237103015@126.com或者QQ36937975进行咨询。\r\n"
-               L"项目地址 github.com/billma007/in-falsus-mouse-sidekey-mapping";
+               L"项目地址 https://github.com/billma007/in-falsus-mouse-sidekey-mapping";
     }
-
     SetWindowText(g_hMainWnd, title.c_str());
     SetWindowText(g_hBtnLang, btnLang.c_str());
     SetWindowText(g_hCheckEnable, chkEnable.c_str());
     SetWindowText(g_hCheckSwap, chkSwap.c_str());
+    SetWindowText(g_hCheckMouseMap, chkMouseMap.c_str());
     SetWindowText(g_hGroupHotkey, grpHotkey.c_str());
     SetWindowText(g_hBtnSetHotkey, btnSet.c_str());
     SetWindowText(g_hDescLabel, desc.c_str());
